@@ -51,6 +51,10 @@ class ProblemStateGenerator:
         self.llm_client.load("implement_solution_problem_state_code", prompt_dict)
         response = self.llm_client.chat()
         solution_problem_state_code = extract(response, "python_code")
+        if not solution_problem_state_code:
+            # 若未成功提取, 抛出更友好的错误信息, 便于调试
+            raise ValueError("无法从 LLM 响应中提取 solution_problem_state 的 python_code, 请检查提示模板或 LLM 返回格式。")
+
         solution_problem_state_code = f"from src.problems.{self.problem}.components import Solution\n" + solution_problem_state_code
         self.llm_client.dump(f"solution_problem_state")
 

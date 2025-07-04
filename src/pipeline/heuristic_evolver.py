@@ -10,6 +10,33 @@ from src.pipeline.hyper_heuristics.single import SingleHyperHeuristic
 from src.pipeline.hyper_heuristics.perturbation import PerturbationHyperHeuristic
 from src.util.util import df_to_str, extract, filter_dict_to_str, parse_text_to_dict, load_function, extract_function_with_short_docstring, search_file
 from src.util.llm_client.base_llm_client import BaseLLMClient
+import sys
+from types import SimpleNamespace
+
+# ---------- Rich Console & Progress (optional) ----------
+try:
+    from rich.console import Console
+    from rich.progress import Progress, BarColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn, MofNCompleteColumn
+    console: Console | None = Console()  # 全局 Rich Console
+except ImportError:  # rich 未安装
+    Progress = None  # type: ignore
+    console = None  # type: ignore
+
+# 如果 Rich 可用，则通过 SimpleNamespace 提供一个与 loguru 类似的接口，便于现有代码复用
+if console:
+    logger = SimpleNamespace(
+        info=lambda message, *args, **kwargs: console.log(message, *args, **kwargs),  # type: ignore[union-attr]
+        warning=lambda message, *args, **kwargs: console.log(f"[bold yellow]WARNING[/] {message}", *args, **kwargs),  # type: ignore[union-attr]
+        error=lambda message, *args, **kwargs: console.log(f"[bold red]ERROR[/] {message}", *args, **kwargs),  # type: ignore[union-attr]
+    )
+else:
+    # Rich 不可用时降级到标准输出
+    logger = SimpleNamespace(
+        info=lambda message, *args, **kwargs: print(message),
+        warning=lambda message, *args, **kwargs: print(message),
+        error=lambda message, *args, **kwargs: print(message),
+    )
+
 class HeuristicEvolver:
     def __init__(
         self,
@@ -47,6 +74,11 @@ class HeuristicEvolver:
             instance_problem_states.append(instance_problem_state)
         self.instance_problem_states_df = pd.DataFrame(instance_problem_states)
 
+        # 在实例初始化时记录信息（日志已全局配置）
+        logger.info(f"Initialized HeuristicEvolver for problem {self.problem} with "
+                    f"{len(self.evolution_cases)} evolution cases and "
+                    f"{len(self.validation_cases)} validation cases")
+
     def evolve(
             self,
             basic_heuristic_file: str,
@@ -59,13 +91,70 @@ class HeuristicEvolver:
             smoke_test: bool=True,
         ) -> None:
 
+        logger.info(f"Begin evolve() with basic_heuristic={basic_heuristic_file}, "
+                    f"perturbation_ratio={perturbation_ratio}, "
+                    f"evolution_round={evolution_round}, "
+                    f"max_refinement_round={max_refinement_round}")
+
+        # ---------------- 进度统计 ----------------
+        # 估算本次 evolve 需要执行的 evolution_single 总次数，作为整体进度衡量。
+        # 估算方式：evolution_round × filtered_num × 演化数据集数量。
+        total_iterations_estimated = evolution_round * filtered_num * len(self.evolution_cases)
+        # 如果 filtered_num 大于可用启发式数量，仍然按 filtered_num 计算，从而给出最坏情况下的上限估计。
+        progress_counter = 0  # 已完成的 evolution_single 次数
+        logger.info(f"[Progress] Total evolution_single iterations estimated: {total_iterations_estimated}")
+
+        # 若 rich 可用，则创建进度条
+        progress = None
+        progress_task_id = None
+        if Progress and total_iterations_estimated > 0:
+            progress = Progress(
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                MofNCompleteColumn(),
+                "[progress.percentage]{task.percentage:>3.0f}%",
+                TimeElapsedColumn(),
+                TimeRemainingColumn(),
+                console=console,  # type: ignore[arg-type]
+                transient=True,  # 结束后清理
+            )
+            progress.start()
+            progress_task_id = progress.add_task("演化进度", total=total_iterations_estimated)
+
         # Prepare other heuristics' description for this evolution
         heuristic_dir = os.path.dirname(basic_heuristic_file)
 
-        heuristic_introduction_docs = "\n".join([
-            extract_function_with_short_docstring(open(search_file(heuristic_file, self.problem)).read(), heuristic_file.split(".")[0])
-            for heuristic_file in os.listdir(heuristic_dir)
-        ])
+        # Collect short docstrings for all heuristic files. Some files might not
+        # conform to the expected pattern and return ``None`` from
+        # ``extract_function_with_short_docstring``.  We therefore filter out any
+        # ``None`` values to avoid ``TypeError`` when joining the list (Python
+        # cannot join ``None`` with ``str``).
+
+        heuristic_docs: list[str] = []
+
+        for file_name in os.listdir(heuristic_dir):
+            # 仅处理 Python 源码文件，忽略日志 / json 等其它文件，避免把非代码内容
+            # 送入 ``extract_function_with_short_docstring``。
+            if not file_name.endswith(".py"):
+                continue
+
+            file_path = os.path.join(heuristic_dir, file_name)
+
+            # ``search_file`` 会在若干默认目录里查找；若直接提供绝对路径，函数
+            # 会立即返回，因此这里直接传入 ``file_path``。
+            code_path = search_file(file_path, self.problem)
+            if code_path is None:
+                continue  # 未找到对应文件，跳过
+
+            with open(code_path, "r") as f:
+                code_str = f.read()
+
+            doc = extract_function_with_short_docstring(code_str, file_name.split(".")[0])
+            if doc:
+                heuristic_docs.append(doc)
+
+        # Remove any ``None`` entries that failed to parse and join the rest.
+        heuristic_introduction_docs = "\n".join(heuristic_docs)
 
         total_heuristic_benchmarks = [(basic_heuristic_file, 0)]
         for _ in range(evolution_round):
@@ -73,6 +162,21 @@ class HeuristicEvolver:
             filtered_heuristic_benchmarks = sorted(total_heuristic_benchmarks, key=lambda x: x[1], reverse=True)[: filtered_num]
             for basic_heuristic_file, _ in filtered_heuristic_benchmarks:
                 for data_name in self.evolution_cases:
+                    # 每进入一次 evolution_single 即视作完成一次迭代，更新进度并打印。
+                    progress_counter += 1
+
+                    # 更新 rich 进度条
+                    if progress and progress_task_id is not None:
+                        progress.update(progress_task_id, advance=1, description=f"{os.path.basename(basic_heuristic_file)} @ {os.path.basename(data_name)}")
+                    else:
+                        # 退化模式：继续使用日志输出
+                        if total_iterations_estimated:
+                            progress_percent = progress_counter / total_iterations_estimated
+                            logger.info(
+                                f"[Progress] evolution_single {progress_counter}/{total_iterations_estimated} "
+                                f"({progress_percent:.2%}) | Heuristic: {os.path.basename(basic_heuristic_file)} | "
+                                f"Data: {os.path.basename(data_name)}"
+                            )
                     evolved_heuristic_with_improvements = self.evolution_single(
                         evolution_data=data_name,
                         basic_heuristic_file=basic_heuristic_file,
@@ -84,6 +188,11 @@ class HeuristicEvolver:
                         smoke_test=smoke_test
                     )
                     total_heuristic_benchmarks.extend(evolved_heuristic_with_improvements)
+
+        # 进度条收尾
+        if progress:
+            progress.stop()
+
         return filtered_heuristic_benchmarks
 
     def evolution_single(
@@ -97,6 +206,7 @@ class HeuristicEvolver:
             max_refinement_round: int=5,
             smoke_test: bool=True
     ) -> list[tuple[str, list[float]]]:
+        logger.info(f"Start evolution_single: data={evolution_data}, basic_heuristic={basic_heuristic_file}")
         try:
             env = Env(data_name=evolution_data)
             basic_heuristic_name = basic_heuristic_file.split(os.sep)[-1].split(".")[0]
@@ -115,6 +225,7 @@ class HeuristicEvolver:
 
             refined_heuristic_benchmarks = []
             if positive_result:
+                logger.info("Perturbation succeeded in improving the baseline solution")
                 print(f"Evolution {basic_heuristic_name} on {evolution_data}")
 
                 prompt_dict = self.llm_client.load_background(self.problem, "background_with_code")
@@ -190,6 +301,7 @@ class HeuristicEvolver:
             trace_string = traceback.format_exc()
             print(trace_string)
 
+        logger.info(f"evolution_single finished: data={evolution_data}, generated {len(refined_heuristic_benchmarks)} refined heuristics")
         return refined_heuristic_benchmarks
 
     def perturbation(
@@ -201,6 +313,7 @@ class HeuristicEvolver:
             perturbation_ratio: float=0.1,
             perturbation_time: int=100,
         ) -> tuple[bool, str, str]:
+        logger.info(f"Start perturbation with ratio={perturbation_ratio}, time={perturbation_time}")
         env.reset(output_dir)
 
         # Generate negative result from basic heuristic
@@ -212,12 +325,19 @@ class HeuristicEvolver:
         # Generate positive result by perturbation heuristic
         positive_result = None
         for _ in range(perturbation_time):
+            logger.info(f"Perturbation round: { _ + 1 }")
             env.reset(output_dir)
             hyper_heuristic = PerturbationHyperHeuristic(basic_heuristic_file, perturbation_heuristic_file, self.problem, perturbation_ratio)
             hyper_heuristic.run(env)
             if env.compare(env.key_value, negative_value) > 0:
                 positive_result = env.dump_result(dump_records=["operation_id", "operator"], result_file="positive_solution.txt")
+                logger.info(f"Better solution found after { _ + 1 } perturbations")
                 break
+        if positive_result:
+            logger.info("Perturbation succeeded in improving the baseline solution")
+        else:
+            logger.info("Perturbation did not yield an improved solution within the attempt limit")
+        logger.info("Perturbation completed")
         return negative_result, positive_result
 
     def load_function_code(self, heuristic_file: str, prompt_dict: dict) -> str:
@@ -266,6 +386,7 @@ class HeuristicEvolver:
             bottleneck_operation_id = int(re.search(r'\d+', bottleneck_operation_id).group())
             bottlenecks.append([bottleneck_operation_id, proposed_operation, reason])
 
+        logger.info(f"Identified {len(bottlenecks)} bottleneck operations")
         return bottlenecks
 
     def raise_suggestion(
@@ -278,6 +399,7 @@ class HeuristicEvolver:
             suggestion_name: str,
             smoke_test: bool,
     ) -> tuple[str, str]:
+        logger.info(f"Processing suggestion for bottleneck_operation_id={bottleneck_operation_id}")
         env.reset()
         self.llm_client.load_chat("bottleneck_operations")
         prompt_dict["bottleneck_operation_id"] = bottleneck_operation_id
@@ -297,6 +419,7 @@ class HeuristicEvolver:
         response = self.llm_client.chat()
         suggestion = extract(response, key="suggestion")
         if suggestion:
+            logger.info("Suggestion generated, implementing new heuristic")
             self.llm_client.dump(suggestion_name)
             # Implement the new code
             heuristic_name = prompt_dict["heuristic_name"]
@@ -324,6 +447,7 @@ class HeuristicEvolver:
             suggestion_name: str,
             smoke_test: bool=True,
     ) -> tuple[str, str, float]:
+        logger.info(f"Refining heuristic {last_heuristic_name} based on prior suggestions")
         # Compare benchmark table
         benchmark_df = self.instance_problem_states_df.copy()
         benchmark_df[basic_heuristic_name] = basic_heuristic_result
@@ -355,6 +479,7 @@ class HeuristicEvolver:
                 suggestion = analysis_result.split(":")[-1]
 
         if suggestion:
+            logger.info(f"Refinement suggestion accepted, generating new heuristic file")
             # Implement the new code
             heuristic_name = prompt_dict["heuristic_name"]
             prompt_dict["suggestion"] = suggestion
@@ -373,6 +498,7 @@ class HeuristicEvolver:
             validation_cases: list[str],
             heuristic_file: str
         ) -> list[float]:
+        logger.info(f"Start validation for heuristic {heuristic_file} on {len(validation_cases)} cases")
         validation_results = []
         heuristic_name = heuristic_file.split(os.sep)[-1].split(".py")[0]
         for data_name in validation_cases:
@@ -382,6 +508,7 @@ class HeuristicEvolver:
             is_complete_valid_solution = hyper_heuristic.run(env)
             result = env.key_value if is_complete_valid_solution else None
             validation_results.append(result)
+        logger.info(f"Validation completed for heuristic {heuristic_file}")
         return validation_results
     
     def get_improvement(self, env:BaseEnv, baselines: list[float], results: list[float]) -> float:

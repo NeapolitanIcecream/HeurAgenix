@@ -4,6 +4,7 @@ import re
 import base64
 import importlib
 from time import sleep
+from typing import Optional
 from src.util.util import compress_numbers, extract, load_framework_description, search_file
 
 
@@ -11,15 +12,15 @@ class BaseLLMClient:
     def __init__(
             self,
             config: dict,
-            prompt_dir: str=None,
-            output_dir: str=None,
+            prompt_dir: Optional[str]=None,
+            output_dir: Optional[str]=None,
         ):
         self.prompt_dir = prompt_dir
         self.output_dir = output_dir
         self.config = config
         self.reset(output_dir)
 
-    def reset(self, output_dir:str=None) -> None:
+    def reset(self, output_dir: Optional[str]=None) -> None:
         self.messages = []
         if output_dir is not None:
             self.output_dir = output_dir

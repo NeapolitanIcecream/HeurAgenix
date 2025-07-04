@@ -8,30 +8,62 @@ import pandas as pd
 import difflib
 
 
-def extract(message: str, key: str, sep=None) -> list[str]:
-    formats = [
-        rf"\*\*\*.*{key}:(.*?)\*\*\*",
-        rf" \*\*\*{key}:(.*?)\*\*\*",
-        rf"\*\*\*\n{key}:(.*?)\*\*\*",
-        rf"\*.*{key}:(.*?)\*",
+def extract(message: str, key: str, sep=None):
+    """从 message 中提取以三颗星(***key***) 包裹的内容。
+
+    OpenAI 等模型的回复格式可能存在以下差异:
+        1. `***python_code:` 与冒号后紧跟换行
+        2. `***python_code` 不带冒号
+
+    为了提升鲁棒性, 这里对冒号做了可选处理, 并允许 key 前后存在空白或换行。
+
+    参数:
+        message (str): 待搜索的完整文本。
+        key (str): 需要提取的关键字段, 例如 "python_code"。
+        sep (str, optional): 如果提供, 在返回前按此分隔符对提取结果再做一次 split。
+
+    返回:
+        Union[str, list[str], None]:
+            - 如果找到内容且未指定 sep, 返回去除首尾空白后的字符串。
+            - 如果找到内容且指定 sep, 返回列表。
+            - 如果在 stars 块中显式返回了 "None"/"none", 返回 None。
+            - 如果未找到, 返回 [] (当指定 sep) 或 None (未指定)。
+    """
+    # print("[qwq begin]\n{message}\n[qwq end]\n")
+
+    # 统一换行, 防止因连续空行导致正则不匹配
+    message = message.replace("\r\n", "\n").replace("\n\n", "\n")
+
+    # 构造若干正则模板, 对冒号设置为可选(:?)
+    patterns = [
+        rf"\*\*\*\s*{key}:?(.*?)\*\*\*",               # ***python_code: ... *** 或 ***python_code ... ***
+        rf" \*\*\*{key}:?(.*?)\*\*\*",                   # 以空格开头的 ***python_code***
+        rf"\*\*\*\n{key}:?(.*?)\*\*\*",                # 换行后紧跟 key
+        rf"\*.*{key}:?(.*?)\*",                            # 单星包装
     ]
-    message.replace("\n\n", "\n")
-    for format in formats:
-        match = re.search(format, message, re.DOTALL)
-        value = None
+
+    for pattern in patterns:
+        match = re.search(pattern, message, re.DOTALL)
         if match:
             value = match.group(1).strip()
-            if value:
-                if sep:
-                    return value.split(sep)
-                else:
-                    if value in ["None", "none"]:
-                        return None
-                    return value
-    if sep:
-        return []
-    else:
-        return None
+            # 处理显式的 None 标记
+            if value in ["None", "none", "none."]:
+                return None
+            if sep:
+                return value.split(sep)
+            return value
+
+    # 额外: 针对 python_code 关键字, 可能使用 ```python ``` 代码块而非星号包装
+    if key == "python_code":
+        code_block = re.search(r"```python(.*?)```", message, re.DOTALL)
+        if code_block:
+            value = code_block.group(1).strip()
+            if sep:
+                return value.split(sep)
+            return value
+
+    # 未找到匹配项, 根据是否要求分割返回默认值
+    return [] if sep else None
 
 def find_closest_match(input_string, string_list):
     matches = difflib.get_close_matches(input_string, string_list, n=1, cutoff=0.0)
@@ -144,6 +176,7 @@ def find_key_value(source_dict: dict, key: object) -> object:
     return None
 
 def extract_function_with_short_docstring(code_str, function_name):
+
     pattern = rf"def {function_name}\(.*?\) -> .*?:\s+\"\"\"(.*?).*Args"
     match = re.search(pattern, code_str, re.DOTALL)
     if match:
@@ -156,6 +189,8 @@ def extract_function_with_short_docstring(code_str, function_name):
         introduction = re.sub(r'\s+', ' ', introduction)
         return f"{function_name}({parameters}): {introduction}"
     else:
+        print(f"[qwq] {function_name}")
+        print(f"[qwq] {code_str}")
         return None
 
 def parse_paper_to_dict(content: str, level=0):
