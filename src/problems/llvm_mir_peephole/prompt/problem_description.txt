@@ -1,0 +1,13 @@
+The problem is to automatically generate a set of **peephole optimization patterns that work at the MachineInstr (MIR) level** of an LLVM backend, leveraging the GlobalISel *GICombiner* infrastructure.  A peephole optimization replaces a short sequence of machine instructions with a more efficient yet semantically-equivalent sequence.
+
+Benchmark input files are provided in LLVM *IR* form **only because IR is easier to collect与分析**；在评测过程中，这些 IR 会先通过 `llc -global-isel` **编译到 MIR/MachineInstr 级别**，然后再加载我们自动生成的 *GICombiner pass plugin* 来应用优化模式。 因此：
+• 任何模式必须以 MIR opcode（如 `G_ADD`, `G_MUL` 等）为匹配对象；
+• 评估指标（指令计数）基于最终生成汇编的行数，而非 IR；
+• Problem-state 中的 opcode 分布、ISA 元数据等也都指向 MachineInstr 语义。
+
+A crucial constraint is that any generated optimization pattern must be semantically equivalent to the original code. It must not alter the program's behavior in any way.
+
+The solution is a list of patterns, where each pattern is a `MIRPeepholePattern` object consisting of:
+1.  `name`: A unique name for the rule (e.g., "CombineAddZero").
+2.  `td_rule`: A complete `GICombineRule` definition in TableGen format. This is the core of the pattern.
+3.  `targeted_opcodes`: A list of the primary MIR opcodes this rule is designed to optimize (e.g., ["G_ADD", "G_MUL"]).

@@ -1,0 +1,18 @@
+This document describes the structure of the `problem_state` dictionary for the LLVM MIR Peephole Optimization problem.
+
+== Instance State (Static properties of the benchmark) ==
+- `total_instructions`: (Integer) The total number of instructions across all .ll files in the benchmark suite. This provides a baseline for measuring optimization effectiveness.
+- `opcode_distribution`: (Dictionary) A map from opcode names (e.g., "G_ADD", "G_MUL", "G_LOAD") to their frequencies in the compiled MIR. This helps identify which instructions are most common and thus are good candidates for optimization.
+- `file_count`: (Integer) The number of files in the benchmark suite.
+- `isa_instr_classes`: (Integer) The number of instruction classes defined in the target's ISA metadata (if available).
+- `isa_register_classes`: (Integer) The number of register classes defined in the target's ISA metadata (if available).
+- `isa_instr_sample`: (List of Strings) A truncated sample (≤50) of instruction class names from the ISA metadata to give the LLM concrete semantic hints.
+- `isa_register_sample`: (List of Strings) A truncated sample (≤50) of register class names from the ISA metadata.
+
+== Solution State (Dynamic properties of the current set of patterns) ==
+- `num_patterns`: (Integer) The current number of optimization patterns in the solution.
+- `num_verified_patterns`: (Integer) The number of patterns that have been successfully verified for semantic correctness.
+- `targeted_opcodes`: (List of Strings) A list of unique opcodes that the current set of patterns attempts to match (e.g., ["G_ADD", "G_SUB"]).
+- `opcode_coverage`: (Float) The fraction of opcodes present in the benchmark that are targeted by at least one pattern.
+- `isa_coverage`: (Float) Fraction of ISA instruction classes that are covered by the current set of patterns.
+- `instruction_reduction_rate`: (Float) The key performance indicator. It represents the percentage of code size reduction achieved by the current set of patterns. A value of 0.05 means a 5% reduction. Higher is better.
