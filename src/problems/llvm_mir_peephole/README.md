@@ -41,7 +41,7 @@ The behavior of the environment can be customized using the following environmen
 | `LLVM_TRIPLE`                       | The target architecture triple for compilation.                                                          | `x86_64`                                       |
 | `LLVM_ISA_JSON`                     | (Optional) Path to a JSON file containing ISA metadata for richer problem state. See below for generation. | Not set                                        |
 | `LLVM_MIR_PEEPHOLE_PLUGIN_CACHE`    | Overrides the default directory for caching compiled plugins.                                            | `/tmp/llvm_mir_peephole_plugins`               |
-| `LLVM_MIR_PEEPHOLE_NINJA_JOBS`      | Controls the number of parallel jobs used by Ninja to build the plugin.                                  | System's CPU count                             |
+| `LLVM_MIR_PEEPHOLE_NINJA_JOBS`      | Controls the number of parallel jobs used by Ninja to build the plugin.                                  | System's CPU count / 2                            |
 
 ### Generating ISA Metadata
 
